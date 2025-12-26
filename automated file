@@ -1,0 +1,486 @@
+import argparse
+import shutil
+import logging
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from collections import Counter, defaultdict
+from typing import Dict, List, Tuple
+import sys
+import json
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+CATEGORY_MAPPINGS = {
+    # Documents
+    '.pdf': 'Documents/PDFs',
+    '.doc': 'Documents/Word',
+    '.docx': 'Documents/Word',
+    '.txt': 'Documents/Text',
+    '.rtf': 'Documents/Text',
+    '.odt': 'Documents/OpenOffice',
+    
+    # Spreadsheets
+    '.xls': 'Documents/Excel',
+    '.xlsx': 'Documents/Excel',
+    '.csv': 'Documents/CSV',
+    
+    # Presentations
+    '.ppt': 'Documents/PowerPoint',
+    '.pptx': 'Documents/PowerPoint',
+    
+    # Images
+    '.jpg': 'Images/JPEG',
+    '.jpeg': 'Images/JPEG',
+    '.png': 'Images/PNG',
+    '.gif': 'Images/GIF',
+    '.bmp': 'Images/Bitmap',
+    '.svg': 'Images/Vector',
+    '.ico': 'Images/Icons',
+    '.webp': 'Images/WebP',
+    
+    # Videos
+    '.mp4': 'Videos/MP4',
+    '.avi': 'Videos/AVI',
+    '.mkv': 'Videos/MKV',
+    '.mov': 'Videos/QuickTime',
+    '.wmv': 'Videos/WMV',
+    '.flv': 'Videos/Flash',
+    
+    # Audio
+    '.mp3': 'Audio/MP3',
+    '.wav': 'Audio/WAV',
+    '.flac': 'Audio/FLAC',
+    '.aac': 'Audio/AAC',
+    '.ogg': 'Audio/OGG',
+    
+    # Archives
+    '.zip': 'Archives/ZIP',
+    '.rar': 'Archives/RAR',
+    '.7z': 'Archives/7Z',
+    '.tar': 'Archives/TAR',
+    '.gz': 'Archives/GZIP',
+    
+    # Code
+    '.py': 'Code/Python',
+    '.java': 'Code/Java',
+    '.cpp': 'Code/CPP',
+    '.c': 'Code/C',
+    '.js': 'Code/JavaScript',
+    '.html': 'Code/HTML',
+    '.css': 'Code/CSS',
+    '.json': 'Code/JSON',
+    '.xml': 'Code/XML',
+    
+    # Executables
+    '.exe': 'Programs/Windows',
+    '.msi': 'Programs/Installers',
+    '.app': 'Programs/MacOS',
+    '.deb': 'Programs/Linux',
+    '.apk': 'Programs/Android',
+}
+
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+
+def setup_logging(log_file: str = 'file_organizer.log', verbose: bool = False):
+    """Configure advanced logging with timestamps and multiple handlers [web:10]"""
+    log_format = '%(asctime)s | %(levelname)-8s | %(funcName)s | %(message)s'
+    date_format = '%Y-%m-%d %H:%M:%S'
+    
+    # File handler with detailed logs
+    file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+    
+    # Console handler for user feedback
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO if verbose else logging.WARNING)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    
+    # Root logger configuration
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+    logger.addhandlers([file_handler, console_handler])
+    
+    return logger
+
+# ============================================================================
+# FILE ORGANIZER CLASS
+# ============================================================================
+
+class FileOrganizer:
+    """Enterprise-grade file organization system with advanced features [web:5]"""
+    
+    def __init__(self, source_dir: Path, dry_run: bool = False, 
+                 recursive: bool = False, remove_duplicates: bool = False):
+        self.source_dir = Path(source_dir).resolve()
+        self.dry_run = dry_run
+        self.recursive = recursive
+        self.remove_duplicates = remove_duplicates
+        
+        # Statistics tracking
+        self.stats = {
+            'files_moved': 0,
+            'files_skipped': 0,
+            'conflicts_resolved': 0,
+            'errors': 0,
+            'duplicates_removed': 0,
+            'directories_created': 0
+        }
+        
+        self.file_hashes = {}  # For duplicate detection
+        self.error_log = []
+        
+        logging.info(f"Initializing FileOrganizer for: {self.source_dir}")
+        logging.info(f"Mode: {'DRY RUN' if dry_run else 'LIVE'} | "
+                    f"Recursive: {recursive} | Deduplication: {remove_duplicates}")
+    
+    def calculate_file_hash(self, file_path: Path, chunk_size: int = 8192) -> str:
+        """Calculate SHA256 hash efficiently using streaming [web:5]"""
+        sha256_hash = hashlib.sha256()
+        try:
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(chunk_size), b""):
+                    sha256_hash.update(chunk)
+            return sha256_hash.hexdigest()
+        except Exception as e:
+            logging.error(f"Hash calculation failed for {file_path}: {e}")
+            return None
+    
+    def resolve_name_conflict(self, target_path: Path) -> Path:
+        """Intelligent filename conflict resolution with versioning [web:5]"""
+        if not target_path.exists():
+            return target_path
+        
+        counter = 1
+        stem = target_path.stem
+        suffix = target_path.suffix
+        parent = target_path.parent
+        
+        while True:
+            new_name = f"{stem}({counter}){suffix}"
+            new_path = parent / new_name
+            if not new_path.exists():
+                logging.info(f"Conflict resolved: {target_path.name} → {new_name}")
+                self.stats['conflicts_resolved'] += 1
+                return new_path
+            counter += 1
+    
+    def get_category(self, file_path: Path) -> str:
+        """Determine file category based on extension [web:1]"""
+        ext = file_path.suffix.lower()
+        return CATEGORY_MAPPINGS.get(ext, 'Other/Uncategorized')
+    
+    def create_directory(self, dir_path: Path) -> bool:
+        """Safely create directory with error handling [web:9]"""
+        try:
+            if not dir_path.exists():
+                if not self.dry_run:
+                    dir_path.mkdir(parents=True, exist_ok=True)
+                    self.stats['directories_created'] += 1
+                logging.info(f"Created directory: {dir_path}")
+            return True
+        except PermissionError:
+            logging.error(f"Permission denied: Cannot create {dir_path}")
+            self.stats['errors'] += 1
+            return False
+        except Exception as e:
+            logging.error(f"Failed to create {dir_path}: {e}")
+            self.stats['errors'] += 1
+            return False
+    
+    def move_file(self, source: Path, destination: Path) -> bool:
+        """Move file with comprehensive error handling [web:6][web:9]"""
+        try:
+            if destination.exists() and destination.stat().st_size == source.stat().st_size:
+                if self.remove_duplicates:
+                    if not self.dry_run:
+                        source.unlink()
+                    logging.info(f"Duplicate removed: {source.name}")
+                    self.stats['duplicates_removed'] += 1
+                    return True
+            
+            if not self.dry_run:
+                shutil.move(str(source), str(destination))
+            
+            logging.info(f"{'[DRY RUN] Would move' if self.dry_run else 'Moved'}: "
+                        f"{source.name} → {destination.relative_to(self.source_dir)}")
+            self.stats['files_moved'] += 1
+            return True
+            
+        except PermissionError:
+            error_msg = f"Permission denied: {source.name} (file may be in use)"
+            logging.error(error_msg)
+            self.error_log.append({'file': str(source), 'error': 'PermissionError'})
+            self.stats['errors'] += 1
+            return False
+            
+        except FileNotFoundError:
+            error_msg = f"File not found: {source}"
+            logging.error(error_msg)
+            self.error_log.append({'file': str(source), 'error': 'FileNotFoundError'})
+            self.stats['errors'] += 1
+            return False
+            
+        except Exception as e:
+            error_msg = f"Unexpected error moving {source.name}: {str(e)}"
+            logging.error(error_msg)
+            self.error_log.append({'file': str(source), 'error': str(e)})
+            self.stats['errors'] += 1
+            return False
+    
+    def organize(self) -> Dict:
+        """Main organization workflow with comprehensive file handling [web:8]"""
+        if not self.source_dir.exists():
+            logging.error(f"Source directory does not exist: {self.source_dir}")
+            return self.stats
+        
+        if not self.source_dir.is_dir():
+            logging.error(f"Source path is not a directory: {self.source_dir}")
+            return self.stats
+        
+        # Get file list based on recursive option
+        if self.recursive:
+            files = [f for f in self.source_dir.rglob("*") if f.is_file()]
+        else:
+            files = [f for f in self.source_dir.iterdir() if f.is_file()]
+        
+        total_files = len(files)
+        logging.info(f"Found {total_files} files to process")
+        
+        if total_files == 0:
+            logging.warning("No files found to organize")
+            return self.stats
+        
+        # Process files
+        for idx, file_path in enumerate(files, 1):
+            try:
+                # Skip hidden files and system files
+                if file_path.name.startswith('.') or file_path.name.startswith('~'):
+                    logging.debug(f"Skipping hidden/system file: {file_path.name}")
+                    self.stats['files_skipped'] += 1
+                    continue
+                
+                # Skip symlinks
+                if file_path.is_symlink():
+                    logging.debug(f"Skipping symlink: {file_path.name}")
+                    self.stats['files_skipped'] += 1
+                    continue
+                
+                # Determine category and target directory
+                category = self.get_category(file_path)
+                target_dir = self.source_dir / category
+                
+                # Create target directory
+                if not self.create_directory(target_dir):
+                    continue
+                
+                # Resolve potential name conflicts
+                target_path = target_dir / file_path.name
+                if target_path.exists():
+                    target_path = self.resolve_name_conflict(target_path)
+                
+                # Duplicate detection (optional)
+                if self.remove_duplicates:
+                    file_hash = self.calculate_file_hash(file_path)
+                    if file_hash and file_hash in self.file_hashes:
+                        if not self.dry_run:
+                            file_path.unlink()
+                        logging.info(f"Duplicate detected and removed: {file_path.name}")
+                        self.stats['duplicates_removed'] += 1
+                        continue
+                    if file_hash:
+                        self.file_hashes[file_hash] = file_path
+                
+                # Move file
+                self.move_file(file_path, target_path)
+                
+                # Progress indicator
+                if idx % 50 == 0 or idx == total_files:
+                    logging.info(f"Progress: {idx}/{total_files} files processed "
+                               f"({(idx/total_files)*100:.1f}%)")
+                    
+            except Exception as e:
+                logging.error(f"Error processing {file_path.name}: {e}")
+                self.stats['errors'] += 1
+        
+        return self.stats
+    
+    def generate_report(self, output_file: str = None) -> str:
+        """Generate comprehensive operation report [web:5]"""
+        report_lines = [
+            "=" * 70,
+            "FILE ORGANIZER - OPERATION REPORT",
+            "=" * 70,
+            f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Source Directory: {self.source_dir}",
+            f"Mode: {'DRY RUN (No changes made)' if self.dry_run else 'LIVE EXECUTION'}",
+            "",
+            "STATISTICS:",
+            "-" * 70,
+            f"Files Successfully Moved:    {self.stats['files_moved']}",
+            f"Files Skipped:               {self.stats['files_skipped']}",
+            f"Conflicts Resolved:          {self.stats['conflicts_resolved']}",
+            f"Duplicates Removed:          {self.stats['duplicates_removed']}",
+            f"Directories Created:         {self.stats['directories_created']}",
+            f"Errors Encountered:          {self.stats['errors']}",
+            "",
+        ]
+        
+        if self.error_log:
+            report_lines.extend([
+                "ERROR DETAILS:",
+                "-" * 70,
+            ])
+            for error in self.error_log[:10]:  # Show first 10 errors
+                report_lines.append(f"• {error['file']}: {error['error']}")
+            if len(self.error_log) > 10:
+                report_lines.append(f"... and {len(self.error_log) - 10} more errors")
+        
+        report_lines.extend([
+            "",
+            "=" * 70,
+        ])
+        
+        report = "
+".join(report_lines)
+        
+        # Save to file if specified
+        if output_file:
+            try:
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    f.write(report)
+                logging.info(f"Report saved to: {output_file}")
+            except Exception as e:
+                logging.error(f"Failed to save report: {e}")
+        
+        return report
+
+# ============================================================================
+# COMMAND-LINE INTERFACE
+# ============================================================================
+
+def parse_arguments():
+    """Parse command-line arguments with comprehensive options [web:2]"""
+    parser = argparse.ArgumentParser(
+        description='🗂️  Automated File Organizer - Professional File Management System',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s /path/to/folder --dry-run
+  %(prog)s ~/Downloads --recursive --verbose
+  %(prog)s ./Documents --remove-duplicates --report summary.txt
+        """
+    )
+    
+    parser.add_argument(
+        'source',
+        type=str,
+        help='Source directory to organize'
+    )
+    
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Preview changes without moving files'
+    )
+    
+    parser.add_argument(
+        '--recursive', '-r',
+        action='store_true',
+        help='Organize files in subdirectories recursively'
+    )
+    
+    parser.add_argument(
+        '--remove-duplicates',
+        action='store_true',
+        help='Remove duplicate files based on content hash'
+    )
+    
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose console output'
+    )
+    
+    parser.add_argument(
+        '--log-file',
+        type=str,
+        default='file_organizer.log',
+        help='Custom log file path (default: file_organizer.log)'
+    )
+    
+    parser.add_argument(
+        '--report',
+        type=str,
+        metavar='FILE',
+        help='Save summary report to specified file'
+    )
+    
+    return parser.parse_args()
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def main():
+    """Main execution function with professional workflow"""
+    print("🗂️  Automated File Organizer v2.0")
+    print("=" * 70)
+    
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Setup logging
+    setup_logging(log_file=args.log_file, verbose=args.verbose)
+    
+    # Validate source directory
+    source_path = Path(args.source)
+    if not source_path.exists():
+        logging.error(f"Error: Directory '{args.source}' does not exist")
+        sys.exit(1)
+    
+    # Initialize organizer
+    try:
+        organizer = FileOrganizer(
+            source_dir=source_path,
+            dry_run=args.dry_run,
+            recursive=args.recursive,
+            remove_duplicates=args.remove_duplicates
+        )
+        
+        # Execute organization
+        print(f"
+{'🔍 DRY RUN MODE' if args.dry_run else '▶️  LIVE MODE'} - Starting organization...
+")
+        stats = organizer.organize()
+        
+        # Generate and display report
+        print("
+" + organizer.generate_report(output_file=args.report))
+        
+        # Log completion
+        logging.info("File organization completed successfully")
+        
+        if args.dry_run:
+            print("
+💡 Tip: Run without --dry-run to actually move files")
+        
+    except KeyboardInterrupt:
+        logging.warning("Operation cancelled by user")
+        print("
+⚠️  Operation cancelled by user")
+        sys.exit(130)
+        
+    except Exception as e:
+        logging.critical(f"Critical error: {e}", exc_info=True)
+        print(f"
+❌ Critical error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
